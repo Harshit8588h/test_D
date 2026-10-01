@@ -26,3 +26,8 @@ def revenue_last_days(days: int = 30) -> int:
 def revenue_summary(days: int = 30) -> str:
     """Return a human-readable revenue line for the ops channel."""
     return f"Last {days} days: {format_money(revenue_last_days(days))}"
+
+
+def revenue_today() -> int:
+    """Return revenue captured today, in cents."""
+    return revenue_last_days(1)
