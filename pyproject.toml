@@ -1,0 +1,9 @@
+[project]
+name = "acme-billing"
+version = "1.4.0"
+description = "ACME billing service — users, orders, and payments."
+requires-python = ">=3.10"
+dependencies = ["fastapi>=0.110", "sqlalchemy>=2.0", "pydantic>=2.5"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

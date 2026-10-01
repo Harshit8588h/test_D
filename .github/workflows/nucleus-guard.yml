@@ -1,0 +1,95 @@
+# Devolyn Guard PR gate.
+#
+# This runs the gate WITHOUT an external action, because the action the onboarding
+# output names -- `nucleus-guard/verify-action@v1` -- does not exist on GitHub. The
+# `nucleus-guard` org returns 404, so a workflow that uses it fails before any step
+# runs, with "Unable to resolve action". See the readiness report.
+#
+# The client is vendored at .devolyn/guard_ci.py instead. That is the SAME file the
+# composite action drives, so this exercises the real endpoints, the real payloads and
+# the real verdict logic -- it just resolves locally rather than from a published repo.
+# It is a harness for this test, not the product fix.
+#
+# The workflow NAME is deliberate: "Nucleus Guard" is the required status-check context
+# the product already writes into connected repositories, and renaming it would orphan
+# branch-protection rules. The required check for THIS workflow, though, is the JOB
+# name -- `guard` -- because GitHub Actions names a check run after its job.
+name: Nucleus Guard
+on: pull_request
+
+permissions:
+  contents: read
+  pull-requests: write      # only for the PR comment
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # base...head needs history. A shallow clone makes the diff empty, and an
+          # empty diff verifies nothing while looking like a pass.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify the changed files
+        id: review
+        env:
+          NUCLEUS_GUARD_URL: ${{ secrets.NUCLEUS_GUARD_URL }}
+          NUCLEUS_GUARD_TOKEN: ${{ secrets.NUCLEUS_GUARD_TOKEN }}
+          NUCLEUS_GUARD_DASHBOARD_URL: ${{ secrets.NUCLEUS_GUARD_URL }}
+        run: |
+          set -uo pipefail
+          SUMMARY="${RUNNER_TEMP}/guard-summary.md"
+          JSON="${RUNNER_TEMP}/guard-summary.json"
+
+          set +e
+          python3 .devolyn/guard_ci.py review \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha }}" \
+            --repo devolyn-gate-test \
+            --env PRODUCTION \
+            --author "${{ github.event.pull_request.user.login }}" \
+            --organization "${{ github.repository_owner }}" \
+            --markdown-out "$SUMMARY" \
+            --json-out "$JSON"
+          CODE=$?
+          set -e
+
+          # Exit 2 is the run itself failing -- an unreachable Guard, a bad token, an
+          # unreadable diff. There is no verdict, and it must BLOCK: an unverified
+          # change is not a verified one.
+          if [ "$CODE" -eq 2 ]; then
+            echo "status=ERROR" >> "$GITHUB_OUTPUT"
+            echo "summary-file=$SUMMARY" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          STATUS=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['status'])" "$JSON")
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "summary-file=$SUMMARY" >> "$GITHUB_OUTPUT"
+          { echo "## Devolyn Guard: $STATUS"; cat "$SUMMARY"; } >> "$GITHUB_STEP_SUMMARY"
+
+      # Before the gate fails, so a red check always comes with its explanation.
+      - name: Comment on the pull request
+        if: ${{ github.event.pull_request.number }}
+        run: |
+          python3 .devolyn/pr_comment.py \
+            --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}" \
+            --token "${{ github.token }}" \
+            --summary-file "${{ steps.review.outputs.summary-file }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Gate the merge
+        run: |
+          case "${{ steps.review.outputs.status }}" in
+            GREEN)  echo "Devolyn Guard verified this change." ;;
+            YELLOW) echo "::error::Escalated. Approve it in the dashboard, then re-run this check WITHOUT pushing -- an approval is bound to the exact commit." >&2; exit 1 ;;
+            RED)    echo "::error::Blocked. See the pull request comment for what was found." >&2; exit 1 ;;
+            *)      echo "::error::Could not verify this change, so it is not cleared. See the log above." >&2; exit 1 ;;
+          esac
